@@ -23,6 +23,19 @@
 using namespace std;
 using namespace boost;
 
+const char* COLOR_LIST_10[] = {
+		"green",
+		"blue",
+		"red",
+		"gold",
+		"magenta",
+		"brown",
+		"black",
+		"darkorange",
+		"salmon",
+		"greenyellow"
+};
+
 class InputParser{
 public:
 	InputParser (int &argc, char **argv){
@@ -47,31 +60,90 @@ private:
 };
 
 
+class CoordCluster{
+public:
+	CoordCluster (MyCoord *uav, int cID){
+		clusterID = cID;
+		clusterHead = new MyCoord(uav->x, uav->y);
+		clusterUAV = uav;
+	}
+
+	void clear(void) {
+		pointsList_bkp.clear();
+		for (auto& pp : pointsList) {
+			pointsList_bkp.push_back(pp);
+		}
+		pointsList.clear();
+	}
+
+	bool checkChange(void) {
+		bool ris = false;
+		for (auto& pp : pointsList) {
+			bool found = false;
+			for (auto& pp_b : pointsList_bkp) {
+				if (pp_b == pp) {
+					found = true;
+					break;
+				}
+			}
+			if (found == false) {
+				ris = true;
+				break;
+			}
+		}
+		return (ris && (pointsList.size() == pointsList_bkp.size()));
+	}
+
+	void printCluter(void) {
+		cout << "UAV " << *clusterUAV << " - ";
+		for (auto it1 = pointsList.begin(); it1 != pointsList.end(); it1++){
+			bool ch = (*it1 == clusterHead);
+			if (ch) {
+				cout << "*";
+			}
+			cout << *(*it1);
+			if (ch) {
+				cout << "*";
+			}
+			cout << " ";
+		}
+	}
+
+public:
+	//std::list<MyCoord> pointsList;
+	std::list<MyCoord *> pointsList;
+	std::list<MyCoord *> pointsList_bkp;
+	MyCoord *clusterHead;
+	MyCoord *clusterUAV;
+	int clusterID;
+};
+
+
 double fRand(double fMin, double fMax)
 {
     double f = (double)rand() / (double)RAND_MAX;
     return fMin + f * (fMax - fMin);
 }
 
-void generateRandomSensors(std::list<MyCoord> &pl, int ss, int ns) {
+void generateRandomSensors(std::list<MyCoord *> &pl, int ss, int ns) {
 	for (int i : boost::irange(0, ns)) { // i goes from 0 to ns-1
-		MyCoord newCoord = MyCoord(fRand(0, ss), fRand(0, ss));
+		MyCoord *newCoord = new MyCoord(fRand(0, ss), fRand(0, ss));
 		pl.push_back(newCoord);
 		cout << "Sensor: " << i << " --> " << newCoord << endl;
 		//cout << newCoord.x << ";" << newCoord.y << endl;
 	}
 }
 
-void generateRandomUAVs(std::list<MyCoord> &pl, int ss, int nu) {
+void generateRandomUAVs(std::list<MyCoord *> &pl, int ss, int nu) {
 	for (int i : boost::irange(0, nu)) { // i goes from 0 to nu-1
-		MyCoord newCoord = MyCoord(fRand(0, ss), fRand(0, ss));
+		MyCoord *newCoord = new MyCoord(fRand(0, ss), fRand(0, ss));
 		pl.push_back(newCoord);
 		cout << "UAV: " << i << " --> " << newCoord << endl;
 		//cout << newCoord.x << ";" << newCoord.y << endl;
 	}
 }
 
-void importPoints(std::string inputFileName, std::list<MyCoord> &pl) {
+void importPoints(std::string inputFileName, std::list<MyCoord *> &pl) {
 	std::ifstream fileInput(inputFileName, std::ifstream::in);
 	std::string str;
 	double x, y;
@@ -79,8 +151,8 @@ void importPoints(std::string inputFileName, std::list<MyCoord> &pl) {
 	if(fileInput.is_open()) {
 		while (std::getline(fileInput, str)) {
 			sscanf(str.c_str(), "%lf;%lf", &x, &y);
-
-			pl.push_back(MyCoord(x, y));
+			MyCoord *np = new MyCoord(x, y);
+			pl.push_back(np);
 
 			//cout << "From file: " << str << ". Parsed: " << x << ";" << y << endl;
 		}
@@ -90,21 +162,137 @@ void importPoints(std::string inputFileName, std::list<MyCoord> &pl) {
 }
 
 
-void writeOnFilePoints(std::string fn, std::list<MyCoord> pointList) {
+void writeOnFilePoints(std::string fn, std::list<MyCoord *> pointList) {
 	std::ofstream fout(fn, std::ofstream::out);
 
 	if (fout.is_open()) {
 		for (auto& p : pointList) { // i goes from 0 to (ni-1) inclusive
-			fout << p.x << ";" << p.y << endl;
+			fout << p->x << ";" << p->y << endl;
 		}
 		fout.close();
 	}
 
 }
 
+void generateDOTfile(std::string outFileName, std::vector<CoordCluster *> &clustVec, double pSize){
+	std::ofstream fout(outFileName, std::ofstream::out);
+	int count = 1;
+	int count_uav = 1;
+
+	if (fout.is_open()) {
+
+		/*double maxCorrelation = 0;
+		int maxIdx = 0;
+		for (int i = 0; i < (int) clustVec.size(); i++) {
+		//for (auto& cv : clustVec) {
+			double actMaxCorrelation = clustVec[i]->getMaxCorrelation();
+
+			if (actMaxCorrelation > maxCorrelation) {
+				maxCorrelation = actMaxCorrelation;
+				maxIdx = i;
+			}
+
+		}*/
+		//return maxCorrelation;
+
+		/*for (int i : boost::irange(0,ni)) { // i goes from 0 to (ni-1) inclusive
+			if (i >= 0) {
+				fout << (std::rand() % 10000) << ";" << (std::rand() % 10000) << endl;
+			}
+		}*/
+
+		fout << "graph G{" << endl;
+
+		for (int i = 0; i < (int) clustVec.size(); i++) {
+			std::string color = std::string(COLOR_LIST_10[i%10]);
+
+			for (auto& p : clustVec[i]->pointsList) {
+				fout << "S" << count << " [shape=\"point\" color=\"" << color << "\" pos=\""
+						<< p->x << "," << p->y << "!\" width=" << pSize << ", height=" << pSize << "]" << endl;
+
+				/*if (i == maxIdx) {
+					fout << "S" << count << "_rad [shape=\"circle\" color=\"" << "black" << "\" style=\"dotted\" label=\"\" pos=\""
+							<< p->x << "," << p->y << "!\" width=" << (2.0/maxCorrelation) << ", height=" << (2.0/maxCorrelation) << "]" << endl;
+				}*/
+
+				count++;
+			}
+
+			fout << "U" << count_uav << " [shape=\"point\" color=\"" << color << "\" pos=\""
+					<< clustVec[i]->clusterUAV->x << "," << clustVec[i]->clusterUAV->y << "!\" width=" << pSize*3 << ", height=" << pSize*3 << "]" << endl;
+
+			fout << "C" << count_uav << " [shape=\"point\" color=\"" << color << "\" pos=\""
+					<< clustVec[i]->clusterHead->x << "," << clustVec[i]->clusterHead->y << "!\" width=" << pSize*2 << ", height=" << pSize*2 << "]" << endl;
+
+			++count_uav;
+		}
+
+		fout << "}" << endl;
+
+		fout.close();
+	}
+}
+
+void kmeans_clustering(std::vector<CoordCluster *> &cv, std::list<MyCoord *> &sl) {
+	bool changed = true;
+	int nIter = 100;
+
+	while (changed && (nIter > 0)) {
+		// clear the clusters
+		for (auto& cc : cv) {
+			cc->clear();
+		}
+
+		// assign the sensors to the clusters
+		for (auto& ss : sl) {
+			CoordCluster *closestCL = nullptr;
+			double minDist = std::numeric_limits<double>::max();
+
+			for (auto& cc : cv) {
+				double ddd = ss->distance(*cc->clusterHead);
+				if (ddd < minDist) {
+					minDist = ddd;
+					closestCL = cc;
+				}
+			}
+
+			if (closestCL != nullptr) {
+				closestCL->pointsList.push_back(ss);
+			}
+		}
+
+		// update the cluster heads
+		for (auto& cc : cv) {
+			MyCoord newClusterCoord = MyCoord(0, 0);
+
+			for (auto& ss : cc->pointsList) {
+				newClusterCoord += *ss;
+			}
+
+			if (cc->pointsList.size() > 0) {
+				newClusterCoord /= (double) cc->pointsList.size();
+			}
+
+			cc->clusterHead->x = newClusterCoord.x;
+			cc->clusterHead->y = newClusterCoord.y;
+		}
+
+		// check if updated
+		changed = false;
+		for (auto& cc : cv) {
+			if (cc->checkChange()) {
+				changed = true;
+				break;
+			}
+		}
+		nIter--;
+	}
+}
+
 int main(int argc, char **argv) {
-	std::list<MyCoord> sensorsList;
-	std::list<MyCoord> uavsList;
+	std::list<MyCoord *> sensorsList;
+	std::list<MyCoord *> uavsList;
+	std::vector<CoordCluster *> clustersVec;
 	int scenarioSize = 100;
 	int nSensors = 40;
 	int nUAV = 3;
@@ -121,6 +309,7 @@ int main(int argc, char **argv) {
 	const std::string &inputNumUAV = input.getCmdOption("-nu");
 	const std::string &scenarioMaxVal = input.getCmdOption("-scenario");
 	const std::string &seedUser = input.getCmdOption("-seed");
+	const std::string &dotFileOutput = input.getCmdOption("-dot");
 
 	if (!seedUser.empty()) {
 		int seedR = atoi(seedUser.c_str());
@@ -159,7 +348,19 @@ int main(int argc, char **argv) {
 		importPoints(inputUAVsFileName, uavsList);
 	}
 
+	clustersVec.resize(uavsList.size(), nullptr);
 
+	int idd = 0;
+	for (auto& uav : uavsList) {
+		clustersVec[idd] = new CoordCluster(uav, idd);
+		++idd;
+	}
+
+	kmeans_clustering(clustersVec, sensorsList);
+
+	if (!dotFileOutput.empty()) {
+		generateDOTfile(dotFileOutput, clustersVec, ((double) scenarioSize)/50.0);
+	}
 
 	cout << "Wake-up Drone FINISH!!!" << endl;
 	return EXIT_SUCCESS;
