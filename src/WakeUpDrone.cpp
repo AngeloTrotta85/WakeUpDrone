@@ -22,10 +22,14 @@
 #include <boost/math/special_functions/factorials.hpp>
 #include "MyCoord.h"
 
-#define K_D 50
-#define K_T 30
-#define K_E 20
-#define K_L 20
+#define K_D 0.1
+#define K_T 0.02
+#define K_E 0.0004
+#define K_L 0.6
+
+#define ALPHA 0.25
+#define BETA 0.25
+#define GAMMA 0.5
 
 using namespace std;
 using namespace boost;
@@ -171,7 +175,7 @@ void generateRandomSensors(std::list<Sensor *> &pl, int ss, int ns) {
 
 		Sensor *newS = new Sensor(MyCoord(uniform_distribution(*generator_rand), uniform_distribution(*generator_rand)), n_distribution(*generator_rand));
 		pl.push_back(newS);
-		cout << "Sensor: " << i << " --> " << newS->coord << endl;
+		cout << "Sensor: " << i << " --> " << newS->coord << " - Energy: " << newS->residual_energy << endl;
 	}
 }
 
@@ -260,7 +264,119 @@ void writeOnFilePoints(std::string fn, std::list<MyCoord *> pointList) {
 	}
 }
 
-void generateDOTfile(std::string outFileName, std::vector<CoordCluster *> &clustVec, double sSize, double pSize){
+double calculate_loss_energy(Sensor *se, int tk, std::list<Sensor *> &sl) {
+	double ris = 0;
+	for (auto& ss : sl) {
+		if (ss != se) {
+			//double old_ris = ris;
+			double actLoss = 0;
+			if (se->residual_energy < ss->residual_energy) {
+				//double exp_exponent = (se->residual_energy - ss->residual_energy) * K_E;
+				//double actLoss = 1.0 / (1.0 + exp(exp_exponent));
+
+				double exp_exponent = (ss->residual_energy - se->residual_energy) * K_E;
+				actLoss = 1.0 - (1.0 / exp(exp_exponent));
+
+				//ris = algebraic_sum(ris, actLoss);
+				if (actLoss > ris) {
+					ris = actLoss;
+				}
+			}
+			//cout << "Sensor Energy - " << se->residual_energy << " - " << ss->residual_energy << " = " << (se->residual_energy - ss->residual_energy);
+			//cout << " - old:" << old_ris << " +^ actLoss:" << actLoss << " = ris:" << ris << endl;
+		}
+	}
+	//cout << endl;
+	return ris;
+}
+
+double calculate_loss_last(Sensor *se, int tk, std::list<Sensor *> &sl) {
+	double ris = 0;
+	int my_tk = 0;
+	int older_R = std::numeric_limits<int>::max();
+	int newer_R = 0;
+
+	if (se->mySensorReadings.size()> 0) {
+		my_tk = se->mySensorReadings.front()->read_time;
+	}
+
+	for (auto& ss : sl) {
+		int last_tk = 0;
+		if (ss->mySensorReadings.size()> 0) {
+			last_tk = ss->mySensorReadings.front()->read_time;
+		}
+
+		if (last_tk < older_R)
+			older_R = last_tk;
+
+		if (last_tk > newer_R)
+			newer_R = last_tk;
+	}
+	if (newer_R > older_R) {
+		ris = (((double) my_tk) - ((double) older_R)) / (((double) newer_R) - ((double) older_R));
+		ris = pow(ris, K_L);
+	}
+	/*for (auto& ss : sl) {
+		if (ss != se) {
+			double old_ris = ris;
+
+			int last_tk = 0;
+			if (ss->mySensorReadings.size()> 0) last_tk = ss->mySensorReadings.front()->read_time;
+			double exp_exponent = (tk - last_tk) * K_L;
+			double actLoss = 1.0 - (1.0 / exp(exp_exponent));
+			ris = algebraic_sum(ris, actLoss);
+
+			cout << "Sensor Last - " << tk << " - " << last_tk << " = " << (tk - last_tk);
+			cout << " - old:" << old_ris << " +^ actLoss:" << actLoss << " = ris:" << ris << endl;
+		}
+	}*/
+	//cout << "Sensor Last - " << older_R << " - " << newer_R << " --> " << my_tk << ". RIS:" << ris << endl;
+	//cout << endl;
+	return ris;
+}
+
+double calculate_loss_distance(Sensor *s1, Sensor *s2) {
+	double exp_exponent = s1->coord.distance(s2->coord) * K_D;
+	return (1.0 / exp(exp_exponent));
+}
+
+double calculate_loss_time(int t1, int t2) {
+	double exp_exponent = abs(t1 - t2) * K_T;
+	return (1.0 / exp(exp_exponent));
+}
+
+double calculate_loss_correlation(Sensor *se, int tk, std::list<Sensor *> &sl) {
+	double ris = 0;
+	for (auto& ss : sl) {
+		//if (ss != se) {
+		for (auto& r : ss->mySensorReadings) {
+			//double old_ris = ris;
+
+			double loss_dist = calculate_loss_distance(se, ss);
+			double loss_time = calculate_loss_time(tk, r->read_time);
+			//double actLoss = algebraic_sum(loss_dist, loss_time);
+			double actLoss = loss_dist * loss_time;
+			//ris = algebraic_sum(ris, actLoss);
+			if (actLoss > ris) {
+				ris = actLoss;
+			}
+
+			//cout << "Sensor Correlation - DIST: " << loss_dist << " TIME:" << loss_time;
+			//cout << " - old:" << old_ris << " +^ actLoss:" << actLoss << " = ris:" << ris << endl;
+		}
+		//}
+	}
+	//cout << endl;
+	return ris;
+}
+
+double calculate_loss_full(Sensor *se, int tk, std::list<Sensor *> &sl, double alpha, double beta, double gamma) {
+	double ris = algebraic_sum(alpha * calculate_loss_energy(se, tk, sl), beta * calculate_loss_last(se, tk, sl));
+	return algebraic_sum(ris, calculate_loss_correlation(se, tk, sl));
+}
+
+void generateDOTfile(std::string outFileName, std::vector<CoordCluster *> &clustVec, std::list<Sensor *> &sensList,
+		double sSize, double pSize, int timeNow){
 	std::ofstream fout(outFileName, std::ofstream::out);
 	int count = 1;
 	int count_uav = 1;
@@ -300,8 +416,24 @@ void generateDOTfile(std::string outFileName, std::vector<CoordCluster *> &clust
 			std::string color = std::string(COLOR_LIST_10[i%10]);
 
 			for (auto& p : clustVec[i]->pointsList) {
-				fout << "S" << count << " [shape=\"point\" color=\"" << color << "\" pos=\""
-						<< p->coord.x << "," << p->coord.y << "!\" width=" << pSize << ", height=" << pSize << "]" << endl;
+				double sLossFull = calculate_loss_full(p, timeNow, sensList, ALPHA, BETA, GAMMA);
+				//double sLossLast = calculate_loss_last(p, timeNow, sensList);
+				//double sLossEnergy = calculate_loss_energy(p, timeNow, sensList);
+				//double sLossCorr = calculate_loss_correlation(p, timeNow, sensList);
+
+
+				//cout << "Sensor " << count
+				//		<< " has loss full: " << sLossFull
+				//		<< " has loss last: " << sLossLast
+				//		<< " has loss energy: " << sLossEnergy
+				//		<< " has loss correlation: " << sLossCorr
+				//		<< endl;
+
+
+				double sSize = pSize * (2 - sLossFull);
+				fout << "S" << count << " [shape=\"point\" color=\"" << color
+						<< "\" pos=\"" << p->coord.x << "," << p->coord.y << "!\" width="
+						<< sSize << ", height=" << sSize << "]" << endl;
 
 				/*if (i == maxIdx) {
 					fout << "S" << count << "_rad [shape=\"circle\" color=\"" << "black" << "\" style=\"dotted\" label=\"\" pos=\""
@@ -311,10 +443,10 @@ void generateDOTfile(std::string outFileName, std::vector<CoordCluster *> &clust
 				count++;
 			}
 
-			fout << "U" << count_uav << " [shape=\"point\" color=\"" << color << "\" pos=\""
+			fout << "U" << count_uav << " [shape=\"star\" color=\"" << color << "\" pos=\""
 					<< clustVec[i]->clusterUAV->recharge_coord.x << "," << clustVec[i]->clusterUAV->recharge_coord.y << "!\" width=" << pSize*3 << ", height=" << pSize*3 << "]" << endl;
 
-			fout << "C" << count_uav << " [shape=\"point\" color=\"" << color << "\" pos=\""
+			fout << "C" << count_uav << " [shape=\"diamond\" color=\"" << color << "\" pos=\""
 					<< clustVec[i]->clusterHead->x << "," << clustVec[i]->clusterHead->y << "!\" width=" << pSize*2 << ", height=" << pSize*2 << "]" << endl;
 
 			++count_uav;
@@ -324,60 +456,6 @@ void generateDOTfile(std::string outFileName, std::vector<CoordCluster *> &clust
 
 		fout.close();
 	}
-}
-
-double calculate_loss_energy(Sensor *se, int tk, std::list<Sensor *> &sl) {
-	double ris = 0;
-	for (auto& ss : sl) {
-		if (ss != se) {
-			double exp_exponent = (se->residual_energy - ss->residual_energy) * K_E;
-			double actLoss = 1.0 / (1.0 + exp(exp_exponent));
-			ris = algebraic_sum(ris, actLoss);
-		}
-	}
-	return ris;
-}
-
-double calculate_loss_last(Sensor *se, int tk, std::list<Sensor *> &sl) {
-	double ris = 0;
-	for (auto& ss : sl) {
-		if (ss != se) {
-			int last_tk = 0;
-			if (ss->mySensorReadings.size()> 0) last_tk = ss->mySensorReadings.front()->read_time;
-			double exp_exponent = (tk - last_tk) * K_L;
-			double actLoss = 1.0 - (1.0 / exp(exp_exponent));
-			ris = algebraic_sum(ris, actLoss);
-		}
-	}
-	return ris;
-}
-
-double calculate_loss_distance(Sensor *s1, Sensor *s2) {
-	double exp_exponent = s1->coord.distance(s2->coord) * K_D;
-	return (1.0 / exp(exp_exponent));
-}
-
-double calculate_loss_time(int t1, int t2) {
-	double exp_exponent = abs(t1 - t2) * K_T;
-	return (1.0 / exp(exp_exponent));
-}
-
-double calculate_loss_correlation(Sensor *se, int tk, std::list<Sensor *> &sl) {
-	double ris = 0;
-	for (auto& ss : sl) {
-		if (ss != se) {
-			for (auto& r : ss->mySensorReadings) {
-				double actLoss = calculate_loss_distance(se, ss) + calculate_loss_time(tk, r->read_time);
-				ris = algebraic_sum(ris, actLoss);
-			}
-		}
-	}
-	return ris;
-}
-
-double calculate_loss_full(Sensor *se, int tk, std::list<Sensor *> &sl, double alpha, double beta, double gamma) {
-	double ris = algebraic_sum(alpha * calculate_loss_energy(se, tk, sl), beta * calculate_loss_last(se, tk, sl));
-	return algebraic_sum(ris, calculate_loss_correlation(se, tk, sl));
 }
 
 void kmeans_clustering(std::vector<CoordCluster *> &cv, std::list<Sensor *> &sl) {
@@ -458,8 +536,8 @@ void kmeans_clustering_withReadings(std::vector<CoordCluster *> &cv, std::list<S
 			for (auto& cc : cv) {
 				double multiplier = 0.0;
 				if (cc->pointsList.size() > 0) {
-					//multiplier = (1.0 - calculate_loss_full(ss, time_now, cc->pointsList,  0.25, 0.25, 0.5));
-					multiplier = calculate_loss_full(ss, time_now, cc->pointsList,  0.25, 0.25, 0.5);
+					//multiplier = (1.0 - calculate_loss_full(ss, time_now, cc->pointsList,  ALPHA, BETA, GAMMA));
+					multiplier = calculate_loss_full(ss, time_now, cc->pointsList,  ALPHA, BETA, GAMMA);
 				}
 				double ddd = ss->coord.distance(*cc->clusterHead) * multiplier;
 
@@ -526,6 +604,32 @@ void generate_readings(std::list<Sensor *> &sl, std::list<UAV *> &ul, int maxTim
 			}
 
 		}
+	}
+}
+
+void printLogsSensors (std::list<Sensor *> &sl, int timeNow) {
+	int count = 0;
+	for (auto& p : sl) {
+		double sLossFull = calculate_loss_full(p, timeNow, sl, ALPHA, BETA, GAMMA);
+		double sLossLast = calculate_loss_last(p, timeNow, sl);
+		double sLossEnergy = calculate_loss_energy(p, timeNow, sl);
+		double sLossCorr = calculate_loss_correlation(p, timeNow, sl);
+
+		cout  << "Sensor " << count
+				<< " --> " << p->coord << ", Energy: " << p->residual_energy
+				<< " LF: " << sLossFull
+				<< " LL: " << sLossLast
+				<< " LE: " << sLossEnergy
+				<< " LC: " << sLossCorr
+				<< " - ";
+
+		cout << "(";
+		for (auto& r : p->mySensorReadings) {
+			cout << r->read_time << " ";
+		}
+		cout << ")" << endl;
+
+		count++;
 	}
 }
 
@@ -596,14 +700,20 @@ int main(int argc, char **argv) {
 		clustersVec[idd] = new CoordCluster(uav, idd);
 		++idd;
 	}
+	int time_N = 100;
+
+	generate_readings(sensorsList, uavsList, time_N);
+
+
+	printLogsSensors(sensorsList, time_N);
 
 	//kmeans_clustering(clustersVec, sensorsList);
 
-	generate_readings(sensorsList, uavsList, 100);
-	kmeans_clustering_withReadings(clustersVec, sensorsList, 100);
+
+	kmeans_clustering_withReadings(clustersVec, sensorsList, time_N);
 
 	if (!dotFileOutput.empty()) {
-		generateDOTfile(dotFileOutput, clustersVec, scenarioSize, ((double) scenarioSize)/50.0);
+		generateDOTfile(dotFileOutput, clustersVec, sensorsList, scenarioSize, ((double) scenarioSize)/50.0, time_N);
 	}
 
 	cout << "Wake-up Drone FINISH!!!" << endl;
