@@ -96,24 +96,41 @@ public:
 	Sensor(MyCoord sensCoord, double re) {
 		coord = sensCoord;
 		residual_energy = re;
+		id = idSensGen++;
+	}
+	Sensor(MyCoord sensCoord, double re, int id_new) {
+		coord = sensCoord;
+		residual_energy = re;
+		id = id_new;
 	}
 
 public:
 	MyCoord coord;
 	double residual_energy;
 	std::list<Readings *> mySensorReadings;
+	int id;
+	static int idSensGen;
 };
+int Sensor::idSensGen = 0;
 
 class UAV {
 public:
 	UAV(MyCoord recCoord) {
 		recharge_coord = recCoord;
+		id = idUAVGen++;
+	}
+	UAV(MyCoord recCoord, int id_new) {
+		recharge_coord = recCoord;
+		id = id_new;
 	}
 
 public:
 	MyCoord recharge_coord;
 	std::list<Readings *> mySensorReadings;
+	int id;
+	static int idUAVGen;
 };
+int UAV::idUAVGen = 0;
 
 class CoordCluster{
 public:
@@ -235,6 +252,43 @@ void importPoints(std::string inputFileName, std::list<MyCoord *> &pl) {
 	}
 }
 
+void importReadingsFromFile(std::string inputFileName, std::list<Sensor *> &sl, std::list<UAV *> &ul, int t) {
+	std::ifstream fileInput(inputFileName, std::ifstream::in);
+	std::string str;
+	int t_in, s, u;
+	double val;
+
+	if(fileInput.is_open()) {
+		while (std::getline(fileInput, str)) {
+			Sensor *s_r = nullptr;
+			UAV *u_r = nullptr;
+
+			sscanf(str.c_str(), "%d;%lf;%d;%d", &t_in, &val, &s, &u);
+
+			for (auto& s_ok : sl) {
+				if (s_ok->id == s) {
+					s_r = s_ok;
+					break;
+				}
+			}
+			for (auto& u_ok : ul) {
+				if (u_ok->id == u) {
+					u_r = u_ok;
+					break;
+				}
+			}
+
+			if ((s_r != nullptr) && (u_r != nullptr)) {
+				Readings *nr = new Readings(s_r, u_r, t_in, val);
+				s_r->mySensorReadings.push_back(nr);
+				u_r->mySensorReadings.push_back(nr);
+			}
+			//cout << "From file: " << str << ". Parsed sensor: " << x << ";" << y << endl;
+		}
+		fileInput.close();
+	}
+}
+
 
 void writeOnFileSensors(std::string fn, std::list<Sensor *> pointList) {
 	std::ofstream fout(fn, std::ofstream::out);
@@ -259,6 +313,26 @@ void writeOnFilePoints(std::string fn, std::list<MyCoord *> pointList) {
 	if (fout.is_open()) {
 		for (auto& p : pointList) { // i goes from 0 to (ni-1) inclusive
 			fout << p->x << ";" << p->y << endl;
+		}
+		fout.close();
+	}
+}
+
+bool compare_readings (const Readings *first, const Readings *second) {
+	return ( first->read_time < second->read_time );
+}
+void writeOnFileReadings(std::string fn, std::list<Sensor *> &sl, int t) {
+	std::ofstream fout(fn, std::ofstream::out);
+	if (fout.is_open()) {
+		std::list <Readings *> rl;
+		for (auto& s : sl) {
+			for (auto& r : s->mySensorReadings) {
+				rl.push_back(r);
+			}
+		}
+		rl.sort(compare_readings);
+		for (auto& r : rl) {
+			fout << r->read_time << ";" << r->value << ";" << r->sensor->id << ";" << r->uav->id << endl;
 		}
 		fout.close();
 	}
@@ -640,6 +714,7 @@ int main(int argc, char **argv) {
 	int scenarioSize = 100;
 	int nSensors = 40;
 	int nUAV = 3;
+	int time_N = 100;
 
 	cout << "Wake-up Drone BEGIN!!!" << endl;
 
@@ -651,9 +726,12 @@ int main(int argc, char **argv) {
 	const std::string &outputUAVsFileName = input.getCmdOption("-ou");
 	const std::string &inputNumSensors = input.getCmdOption("-ns");
 	const std::string &inputNumUAV = input.getCmdOption("-nu");
+	const std::string &inputReadingsFileName = input.getCmdOption("-ir");
+	const std::string &outputReadingsFileName = input.getCmdOption("-or");
 	const std::string &scenarioMaxVal = input.getCmdOption("-scenario");
 	const std::string &seedUser = input.getCmdOption("-seed");
 	const std::string &dotFileOutput = input.getCmdOption("-dot");
+	const std::string &inputTimeSim = input.getCmdOption("-time");
 
 	if (!seedUser.empty()) {
 		int seedR = atoi(seedUser.c_str());
@@ -671,6 +749,9 @@ int main(int argc, char **argv) {
 	}
 	if (!inputNumUAV.empty()) {
 		nUAV = atoi(inputNumUAV.c_str());
+	}
+	if (!inputTimeSim.empty()) {
+		time_N = atoi(inputTimeSim.c_str());
 	}
 
 	if (inputSensorsFileName.empty()) {
@@ -693,6 +774,16 @@ int main(int argc, char **argv) {
 		importUAVsFromFile(inputUAVsFileName, uavsList);
 	}
 
+	if (inputReadingsFileName.empty()) {
+		generate_readings(sensorsList, uavsList, time_N);
+		if (!outputReadingsFileName.empty()) {
+			writeOnFileReadings(outputReadingsFileName, sensorsList, time_N);
+		}
+	}
+	else {
+		importReadingsFromFile(inputReadingsFileName, sensorsList, uavsList, time_N);
+	}
+
 	clustersVec.resize(uavsList.size(), nullptr);
 
 	int idd = 0;
@@ -700,16 +791,10 @@ int main(int argc, char **argv) {
 		clustersVec[idd] = new CoordCluster(uav, idd);
 		++idd;
 	}
-	int time_N = 100;
-
-	generate_readings(sensorsList, uavsList, time_N);
-
 
 	printLogsSensors(sensorsList, time_N);
 
 	//kmeans_clustering(clustersVec, sensorsList);
-
-
 	kmeans_clustering_withReadings(clustersVec, sensorsList, time_N);
 
 	if (!dotFileOutput.empty()) {
