@@ -22,14 +22,14 @@
 #include <boost/math/special_functions/factorials.hpp>
 #include "MyCoord.h"
 
-#define K_D 0.1
+#define K_D 0.08
 #define K_T 0.02
 #define K_E 0.0004
 #define K_L 0.6
 
-#define ALPHA 0.25
-#define BETA 0.25
-#define GAMMA 0.5
+#define ALPHA 0.15
+#define BETA 0.15
+#define GAMMA 0.7
 
 using namespace std;
 using namespace boost;
@@ -386,6 +386,14 @@ double calculate_loss_last(Sensor *se, int tk, std::list<Sensor *> &sl) {
 		if (last_tk > newer_R)
 			newer_R = last_tk;
 	}
+
+	//check my time ('se' can not be in 'sl')
+	if (my_tk < older_R)
+		older_R = my_tk;
+
+	if (my_tk > newer_R)
+		newer_R = my_tk;
+
 	if (newer_R > older_R) {
 		ris = (((double) my_tk) - ((double) older_R)) / (((double) newer_R) - ((double) older_R));
 		ris = pow(ris, K_L);
@@ -445,8 +453,19 @@ double calculate_loss_correlation(Sensor *se, int tk, std::list<Sensor *> &sl) {
 }
 
 double calculate_loss_full(Sensor *se, int tk, std::list<Sensor *> &sl, double alpha, double beta, double gamma) {
-	double ris = algebraic_sum(alpha * calculate_loss_energy(se, tk, sl), beta * calculate_loss_last(se, tk, sl));
-	return algebraic_sum(ris, calculate_loss_correlation(se, tk, sl));
+	double loss_energy = calculate_loss_energy(se, tk, sl);
+	double loss_last = calculate_loss_last(se, tk, sl);
+	double loss_corr = calculate_loss_correlation(se, tk, sl);
+
+	double ris = algebraic_sum( algebraic_sum(alpha * loss_energy, beta * loss_last), gamma * loss_corr);
+
+	//cout << "calculate_loss_full: " << ris
+	//		<< "; loss_energy: " << loss_energy
+	//		<< "; loss_last: " << loss_last
+	//		<< "; loss_corr: " << loss_corr
+	//		<< endl << flush;
+
+	return ris;
 }
 
 void generateDOTfile(std::string outFileName, std::vector<CoordCluster *> &clustVec, std::list<Sensor *> &sensList,
@@ -529,6 +548,37 @@ void generateDOTfile(std::string outFileName, std::vector<CoordCluster *> &clust
 		fout << "}" << endl;
 
 		fout.close();
+	}
+}
+
+void printLossStats(std::vector<CoordCluster *> &cv, std::list<Sensor *> &sl, int time_now) {
+	for (auto& c : cv) {
+		double sumLosses = 0;
+		double avgLoss = 0;
+		double minLoss = std::numeric_limits<double>::max();
+		double maxLoss = -1;
+
+		for (auto& s : c->pointsList) {
+			//double actLoss_only = calculate_loss_full(s, time_now, c->pointsList,  ALPHA, BETA, GAMMA);
+			double actLoss_only = calculate_loss_full(s, time_now, sl,  ALPHA, BETA, GAMMA);
+			double actLoss = s->coord.distance(c->clusterUAV->recharge_coord) * actLoss_only;
+
+			sumLosses += actLoss;
+
+			if (actLoss > maxLoss) {
+				maxLoss = actLoss;
+			}
+			if (actLoss < minLoss) {
+				minLoss = actLoss;
+			}
+		}
+		if (c->pointsList.size() > 0) {
+			avgLoss = sumLosses / ((double) c->pointsList.size());
+		}
+
+		cout << "Cluster " << c->clusterID << "[" << COLOR_LIST_10[(c->clusterID)%10] << "] has avLoss: " << avgLoss <<
+				"[" << minLoss << "; " << maxLoss << "]"
+				" sumLosses: " << sumLosses << endl;
 	}
 }
 
@@ -655,6 +705,252 @@ void kmeans_clustering_withReadings(std::vector<CoordCluster *> &cv, std::list<S
 	cout << "k-means ended in " << 200 - nIter << " iterations" << endl;
 }
 
+void randomizeClusters(std::vector<CoordCluster *> &cv, std::list<Sensor *> &sl) {
+	unsigned int n4cluster = floor(double(sl.size()) / double(cv.size()));
+	unsigned int remainingP = sl.size() - (cv.size() * n4cluster);
+
+	std::vector<Sensor *> sl_bkp;
+	for (auto& s : sl) {
+		sl_bkp.push_back(s);
+	}
+	std::random_shuffle(sl_bkp.begin(), sl_bkp.end());
+
+	auto it_s = sl_bkp.begin();
+
+	for (auto& c : cv) {
+
+		if (it_s == sl_bkp.end()) break;
+
+		for (unsigned int j = 0; j < n4cluster; ++j) {
+			c->pointsList.push_back(*it_s);
+			it_s++;
+		}
+
+		if (it_s == sl_bkp.end()) break;
+
+		if (remainingP > 0) {
+			c->pointsList.push_back(*it_s);
+			--remainingP;
+			it_s++;
+		}
+	}
+
+	// update the cluster heads
+	for (auto& cc : cv) {
+		MyCoord newClusterCoord = MyCoord(0, 0);
+
+		for (auto& ss : cc->pointsList) {
+			newClusterCoord += ss->coord;
+		}
+
+		if (cc->pointsList.size() > 0) {
+			newClusterCoord /= (double) cc->pointsList.size();
+		}
+
+		cc->clusterHead->x = newClusterCoord.x;
+		cc->clusterHead->y = newClusterCoord.y;
+	}
+}
+
+void equalizeLoss(std::vector<CoordCluster *> &cv, std::list<Sensor *> &sl, int time_now) {
+	for (auto& c : cv) {
+		double sumLosses = 0;
+		double avgLoss = 0;
+		double minLoss = std::numeric_limits<double>::max();
+		double maxLoss = -1;
+
+		for (auto& s : c->pointsList) {
+			//double actLoss_only = calculate_loss_full(s, time_now, c->pointsList,  ALPHA, BETA, GAMMA);
+			double actLoss_only = calculate_loss_full(s, time_now, sl,  ALPHA, BETA, GAMMA);
+			double actLoss = s->coord.distance(c->clusterUAV->recharge_coord) * actLoss_only;
+
+			sumLosses += actLoss;
+
+			if (actLoss > maxLoss) {
+				maxLoss = actLoss;
+			}
+			if (actLoss < minLoss) {
+				minLoss = actLoss;
+			}
+		}
+		if (c->pointsList.size() > 0) {
+			avgLoss = sumLosses / ((double) c->pointsList.size());
+		}
+
+		cout << "Cluster " << c->clusterID << " has avLoss: " << avgLoss << "[" << minLoss << "; " << maxLoss << "]" << endl;
+	}
+}
+
+void equalizerLoss_clustering(std::vector<CoordCluster *> &cv, std::list<Sensor *> &sl, int time_now) {
+	randomizeClusters(cv, sl);
+
+	equalizeLoss(cv, sl, time_now);
+}
+
+void randomMinimumLoss_clustering(std::vector<CoordCluster *> &cv, std::list<Sensor *> &sl, int time_now) {
+	unsigned int n4cluster = floor(double(sl.size()) / double(cv.size()));
+	unsigned int remainingP = sl.size() - (cv.size() * n4cluster);
+
+	std::vector<Sensor *> sl_bkp;
+	for (auto& s : sl) {
+		sl_bkp.push_back(s);
+	}
+	std::random_shuffle(sl_bkp.begin(), sl_bkp.end());
+
+	for (auto& s : sl_bkp) {
+		double actLoss_only = calculate_loss_full(s, time_now, sl,  ALPHA, BETA, GAMMA);
+		CoordCluster *closesrC = nullptr;
+		double minLossC = std::numeric_limits<double>::max();
+
+		for (auto& c : cv) {
+			if ((c->pointsList.size() < n4cluster) || ((c->pointsList.size() == n4cluster) && (remainingP > 0))) {
+				double actLoss = s->coord.distance(c->clusterUAV->recharge_coord) * actLoss_only;
+
+				if (actLoss < minLossC) {
+					actLoss = minLossC;
+					closesrC = c;
+				}
+			}
+		}
+		if (closesrC != nullptr) {
+			if (closesrC->pointsList.size() == n4cluster) {
+				--remainingP;
+			}
+			closesrC->pointsList.push_back(s);
+		}
+	}
+
+	// update the cluster heads
+	for (auto& cc : cv) {
+		MyCoord newClusterCoord = MyCoord(0, 0);
+
+		for (auto& ss : cc->pointsList) {
+			newClusterCoord += ss->coord;
+		}
+
+		if (cc->pointsList.size() > 0) {
+			newClusterCoord /= (double) cc->pointsList.size();
+		}
+
+		cc->clusterHead->x = newClusterCoord.x;
+		cc->clusterHead->y = newClusterCoord.y;
+	}
+}
+
+void roundRobinMinimumLossLocal_clustering(std::vector<CoordCluster *> &cv, std::list<Sensor *> &sl, int time_now) {
+
+	std::list<Sensor *> sl_bkp;
+	for (auto& s : sl) {
+		sl_bkp.push_back(s);
+	}
+	std::vector<CoordCluster *> cv_bkp;
+	for (auto& c : cv) {
+		cv_bkp.push_back(c);
+	}
+	std::random_shuffle(cv_bkp.begin(), cv_bkp.end());
+
+	auto it_c = cv_bkp.begin();
+	while (!sl_bkp.empty()) {
+		std::list<Sensor *>::iterator closestSensor; // = sl_bkp.begin();
+		double minLossC = std::numeric_limits<double>::max();
+
+
+		for (auto it_s = sl_bkp.begin(); it_s != sl_bkp.end(); it_s++) {
+			double actLoss_only = calculate_loss_full(*it_s, time_now, sl,  ALPHA, BETA, GAMMA);
+			double actLossLocal_only = calculate_loss_full(*it_s, time_now, (*it_c)->pointsList,  ALPHA, BETA, GAMMA);
+			double actLoss_sum = algebraic_sum(actLoss_only, actLossLocal_only);
+			double distance = (*it_s)->coord.distance((*it_c)->clusterUAV->recharge_coord);
+			double actLoss = distance * actLoss_sum;
+
+			//cout << "Losses ->"
+			//		<< " actLoss_only: " << actLoss_only
+			//		<< " actLossLocal_only: " << actLossLocal_only << "(pl_size: " << (*it_c)->pointsList.size() << ")"
+			//		<< " actLoss_sum: " << actLoss_sum
+			//		<< " actLoss: " << actLoss << endl << flush;
+
+			if (actLoss < minLossC) {
+				minLossC = actLoss;
+				closestSensor = it_s;
+			}
+		}
+
+		(*it_c)->pointsList.push_back(*closestSensor);
+		sl_bkp.erase(closestSensor);
+
+		it_c++;
+		if (it_c == cv_bkp.end()){
+			std::random_shuffle(cv_bkp.begin(), cv_bkp.end());
+			it_c = cv_bkp.begin();
+		}
+	}
+
+
+	// update the cluster heads
+	for (auto& cc : cv) {
+		MyCoord newClusterCoord = MyCoord(0, 0);
+
+		for (auto& ss : cc->pointsList) {
+			newClusterCoord += ss->coord;
+		}
+
+		if (cc->pointsList.size() > 0) {
+			newClusterCoord /= (double) cc->pointsList.size();
+		}
+
+		cc->clusterHead->x = newClusterCoord.x;
+		cc->clusterHead->y = newClusterCoord.y;
+	}
+
+}
+
+void roundRobinMinimumLoss_clustering(std::vector<CoordCluster *> &cv, std::list<Sensor *> &sl, int time_now) {
+
+	std::list<Sensor *> sl_bkp;
+	for (auto& s : sl) {
+		sl_bkp.push_back(s);
+	}
+
+	auto it_c = cv.begin();
+	while (!sl_bkp.empty()) {
+		std::list<Sensor *>::iterator closestSensor;
+		double minLossC = std::numeric_limits<double>::max();
+
+		for (auto it_s = sl_bkp.begin(); it_s != sl_bkp.end(); it_s++) {
+			double actLoss_only = calculate_loss_full(*it_s, time_now, sl,  ALPHA, BETA, GAMMA);
+			double actLoss = (*it_s)->coord.distance((*it_c)->clusterUAV->recharge_coord) * actLoss_only;
+
+			if (actLoss < minLossC) {
+				minLossC = actLoss;
+				closestSensor = it_s;
+			}
+		}
+
+		(*it_c)->pointsList.push_back(*closestSensor);
+		sl_bkp.erase(closestSensor);
+
+		it_c++;
+		if (it_c == cv.end()){
+			it_c = cv.begin();
+		}
+	}
+
+	// update the cluster heads
+	for (auto& cc : cv) {
+		MyCoord newClusterCoord = MyCoord(0, 0);
+
+		for (auto& ss : cc->pointsList) {
+			newClusterCoord += ss->coord;
+		}
+
+		if (cc->pointsList.size() > 0) {
+			newClusterCoord /= (double) cc->pointsList.size();
+		}
+
+		cc->clusterHead->x = newClusterCoord.x;
+		cc->clusterHead->y = newClusterCoord.y;
+	}
+}
+
 void generate_readings(std::list<Sensor *> &sl, std::list<UAV *> &ul, int maxTime) {
 	std::uniform_real_distribution<double> uniform_distribution(0.0, 1.0);
 	std::uniform_int_distribution<int> uniform_distribution_uav(0.0, ul.size()-1);
@@ -676,7 +972,6 @@ void generate_readings(std::list<Sensor *> &sl, std::list<UAV *> &ul, int maxTim
 				ss->mySensorReadings.push_front(read_new);
 				u_reading->mySensorReadings.push_front(read_new);
 			}
-
 		}
 	}
 }
@@ -732,6 +1027,7 @@ int main(int argc, char **argv) {
 	const std::string &seedUser = input.getCmdOption("-seed");
 	const std::string &dotFileOutput = input.getCmdOption("-dot");
 	const std::string &inputTimeSim = input.getCmdOption("-time");
+	const std::string &algotype = input.getCmdOption("-algo");
 
 	if (!seedUser.empty()) {
 		int seedR = atoi(seedUser.c_str());
@@ -794,8 +1090,40 @@ int main(int argc, char **argv) {
 
 	printLogsSensors(sensorsList, time_N);
 
+	if (!algotype.empty()) {
+		if (algotype.compare("kmS") == 0) {
+			kmeans_clustering(clustersVec, sensorsList); //simple k-means
+		}
+		else if (algotype.compare("kmR") == 0) {
+			kmeans_clustering_withReadings(clustersVec, sensorsList, time_N);	//k-means with loss in the distance calculus
+		}
+		else if (algotype.compare("eqLoss") == 0) {
+			equalizerLoss_clustering(clustersVec, sensorsList, time_N);	// just random for now
+		}
+		else if (algotype.compare("eqRandLoss") == 0) {
+			randomMinimumLoss_clustering(clustersVec, sensorsList, time_N);	// from each random sensor choose the closest cluster
+		}
+		else if (algotype.compare("rrMinLoss") == 0) {
+			roundRobinMinimumLoss_clustering(clustersVec, sensorsList, time_N);	// round robin cluster, choose mis loss sensor
+		}
+		else if (algotype.compare("rrMinLossLocal") == 0) {
+			roundRobinMinimumLossLocal_clustering(clustersVec, sensorsList, time_N);	// round robin cluster, choose mis loss sensor
+		}
+		else {
+			cerr << "Unknown algotype: \"" << algotype << "\". Using default simple k-means" << endl;
+			kmeans_clustering(clustersVec, sensorsList);
+		}
+
+		printLossStats(clustersVec, sensorsList, time_N);
+
+	}
+	else {
+		//default simple k-means
+		kmeans_clustering(clustersVec, sensorsList);
+	}
+
 	//kmeans_clustering(clustersVec, sensorsList);
-	kmeans_clustering_withReadings(clustersVec, sensorsList, time_N);
+	//kmeans_clustering_withReadings(clustersVec, sensorsList, time_N);
 
 	if (!dotFileOutput.empty()) {
 		generateDOTfile(dotFileOutput, clustersVec, sensorsList, scenarioSize, ((double) scenarioSize)/50.0, time_N);
