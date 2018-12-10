@@ -13,6 +13,7 @@
 #include <algorithm>    // std::find
 #include <vector>       // std::vector
 #include <list>       // std::list
+#include <map>       // std::list
 #include <cstdlib>
 #include <ctime>
 #include <random>
@@ -21,6 +22,7 @@
 #include <boost/range/irange.hpp>
 #include <boost/math/special_functions/factorials.hpp>
 #include "MyCoord.h"
+#include "tsp.h"
 
 #define K_D 0.08
 #define K_T 0.02
@@ -175,9 +177,49 @@ public:
 	//std::list<MyCoord> pointsList;
 	std::list<Sensor *> pointsList;
 	std::list<Sensor *> pointsList_bkp;
+	std::list<Sensor *> pointsTSP_listFinal;
+	std::list<Sensor *> pointsNoTSP_listFinal;
 	MyCoord *clusterHead;
 	UAV *clusterUAV;
 	int clusterID;
+};
+
+class MyTSP {
+public:
+	MyTSP(std::list<Sensor *> sl) {
+		//int count = sl.size();
+		for (auto& s : sl) {
+			cities.push_back(s);
+
+			distance_graph[s->id] = map<int, double>();
+			for (auto& s1 : sl) {
+				distance_graph[s->id][s1->id] = 0;
+			}
+
+			path_vals[s->id] = std::make_pair(0, 0);
+			adj_list[s->id] = list<Sensor *>();
+		}
+	}
+
+	int get_size() {return cities.size();};
+
+	void fillMatrix() {
+		for (auto& s1 : cities) {
+			for (auto& s2 : cities) {
+				distance_graph[s1->id][s2->id] = s1->coord.distance(s2->coord);
+			}
+		}
+	}
+
+	void findMST() {
+
+	}
+
+public:
+	vector<Sensor *> cities;
+	map< int, map<int, double> > distance_graph;
+	map< int, std::pair<double, double> > path_vals;
+	map< int, list<Sensor *> > adj_list;
 };
 
 double algebraic_sum(double a, double b) {
@@ -471,8 +513,6 @@ double calculate_loss_full(Sensor *se, int tk, std::list<Sensor *> &sl, double a
 void generateDOTfile(std::string outFileName, std::vector<CoordCluster *> &clustVec, std::list<Sensor *> &sensList,
 		double sSize, double pSize, int timeNow){
 	std::ofstream fout(outFileName, std::ofstream::out);
-	int count = 1;
-	int count_uav = 1;
 
 	if (fout.is_open()) {
 
@@ -508,6 +548,12 @@ void generateDOTfile(std::string outFileName, std::vector<CoordCluster *> &clust
 		for (int i = 0; i < (int) clustVec.size(); i++) {
 			std::string color = std::string(COLOR_LIST_10[i%10]);
 
+			fout << "U" << clustVec[i]->clusterUAV->id << " [shape=\"star\" color=\"" << color << "\" pos=\""
+					<< clustVec[i]->clusterUAV->recharge_coord.x << "," << clustVec[i]->clusterUAV->recharge_coord.y << "!\" width=" << pSize*3 << ", height=" << pSize*3 << "]" << endl;
+
+			fout << "C" << clustVec[i]->clusterUAV->id << " [shape=\"diamond\" color=\"" << color << "\" pos=\""
+					<< clustVec[i]->clusterHead->x << "," << clustVec[i]->clusterHead->y << "!\" width=" << pSize*2 << ", height=" << pSize*2 << "]" << endl;
+
 			for (auto& p : clustVec[i]->pointsList) {
 				double sLossFull = calculate_loss_full(p, timeNow, sensList, ALPHA, BETA, GAMMA);
 				//double sLossLast = calculate_loss_last(p, timeNow, sensList);
@@ -524,7 +570,7 @@ void generateDOTfile(std::string outFileName, std::vector<CoordCluster *> &clust
 
 
 				double sSize = pSize * (2 - sLossFull);
-				fout << "S" << count << " [shape=\"point\" color=\"" << color
+				fout << "S" << p->id << " [shape=\"point\" color=\"" << color
 						<< "\" pos=\"" << p->coord.x << "," << p->coord.y << "!\" width="
 						<< sSize << ", height=" << sSize << "]" << endl;
 
@@ -532,17 +578,26 @@ void generateDOTfile(std::string outFileName, std::vector<CoordCluster *> &clust
 					fout << "S" << count << "_rad [shape=\"circle\" color=\"" << "black" << "\" style=\"dotted\" label=\"\" pos=\""
 							<< p->x << "," << p->y << "!\" width=" << (2.0/maxCorrelation) << ", height=" << (2.0/maxCorrelation) << "]" << endl;
 				}*/
-
-				count++;
 			}
 
-			fout << "U" << count_uav << " [shape=\"star\" color=\"" << color << "\" pos=\""
-					<< clustVec[i]->clusterUAV->recharge_coord.x << "," << clustVec[i]->clusterUAV->recharge_coord.y << "!\" width=" << pSize*3 << ", height=" << pSize*3 << "]" << endl;
+			auto p1 = clustVec[i]->pointsTSP_listFinal.begin();
+			auto p2 = clustVec[i]->pointsTSP_listFinal.begin();
+			if (p2 != clustVec[i]->pointsTSP_listFinal.end()) {
+				p2++;
 
-			fout << "C" << count_uav << " [shape=\"diamond\" color=\"" << color << "\" pos=\""
-					<< clustVec[i]->clusterHead->x << "," << clustVec[i]->clusterHead->y << "!\" width=" << pSize*2 << ", height=" << pSize*2 << "]" << endl;
+				fout << "U" << clustVec[i]->clusterUAV->id << " -- S" << (*p1)->id << " [color=\"" << color << "\"]" << endl;
 
-			++count_uav;
+				while (p2 != clustVec[i]->pointsTSP_listFinal.end()) {
+
+					fout << "S" << (*p1)->id << " -- S" << (*p2)->id << " [color=\"" << color << "\"]" << endl;
+
+					p1++;
+					p2++;
+				}
+
+				fout << "S" << (*p1)->id << " -- U" << clustVec[i]->clusterUAV->id << " [color=\"" << color << "\"]" << endl;
+			}
+
 		}
 
 		fout << "}" << endl;
@@ -951,6 +1006,111 @@ void roundRobinMinimumLoss_clustering(std::vector<CoordCluster *> &cv, std::list
 	}
 }
 
+void fullRandom_tsp(std::vector<CoordCluster *> &cv) {
+	for (auto& c : cv) {
+		c->pointsTSP_listFinal.clear();
+		c->pointsNoTSP_listFinal.clear();
+
+		for (auto& s : c->pointsList) {
+			c->pointsTSP_listFinal.push_back(s);
+		}
+	}
+}
+
+void noFullRandom_tsp(std::vector<CoordCluster *> &cv) {
+	for (auto& c : cv) {
+		c->pointsTSP_listFinal.clear();
+		c->pointsNoTSP_listFinal.clear();
+
+		std::uniform_int_distribution<int> uniform_distribution_TSP(1.0, c->pointsList.size()-1);
+		int r_tsp = uniform_distribution_TSP(*generator_rand);
+
+		//cout << "noFullRandom_tsp: generating " << r_tsp
+
+		for (auto& s : c->pointsList) {
+			if (r_tsp > 0) {
+				c->pointsTSP_listFinal.push_back(s);
+			}
+			else {
+				c->pointsNoTSP_listFinal.push_back(s);
+			}
+			--r_tsp;
+		}
+	}
+}
+
+void christofides_tsp(std::vector<CoordCluster *> &cv) {
+	for (auto& c : cv) {
+		MyTSP mytsp(c->pointsList);
+
+		cout << "tsp created" << endl;
+		int mytsp_size = mytsp.get_size();
+
+		// Fill N x N matrix with distances between nodes
+		cout << "Fillmatrix started" << endl;
+		mytsp.fillMatrix();
+		cout << "Filled Matrix" << endl;
+
+		// Find a MST T in graph G
+		mytsp.findMST();
+		cout << "MST created" << endl;
+
+
+		TSP tsp(c->pointsList);
+
+		//cout << "tsp created" << endl;
+		int tsp_size = tsp.get_size();
+
+		// Fill N x N matrix with distances between nodes
+		//cout << "Fillmatrix started" << endl;
+		//tsp.fillMatrix();
+		//cout << "Filled Matrix" << endl;
+
+		// Find a MST T in graph G
+		tsp.findMST();
+		cout << "MST created" << endl;
+
+		// Find a minimum weighted matching M for odd vertices in T
+		tsp.perfectMatching();
+		cout << "Matching completed" << endl;
+
+		// Loop through each index and find shortest path
+		int best = INT_MAX;
+		int bestIndex;
+		for (long t = 0; t < tsp_size; t++) {
+			int result = tsp.findBestPath(t);
+
+			tsp.path_vals[t][0] = t; // set start
+			tsp.path_vals[t][1] = result; // set end
+
+			if (tsp.path_vals[t][1] < best) {
+				bestIndex = tsp.path_vals[t][0];
+				best = tsp.path_vals[t][1];
+			}
+		}
+
+		//Create path for best tour
+		tsp.euler_tour(bestIndex,tsp.circuit);
+		tsp.make_hamiltonian(tsp.circuit,tsp.pathLength);
+
+		/*
+			tsp.euler_tour(0, tsp.circuit);
+			cout << "euler completed" << endl;
+			tsp.make_hamiltonian(tsp.circuit, tsp.pathLength);
+			cout << "ham completed" << endl;
+		 */
+
+		// Store best path
+		//tsp.create_tour(bestIndex);
+
+		cout << "Final length: " << tsp.pathLength << endl;
+
+		// Print to file
+		tsp.printPath();
+		tsp.printResult();
+	}
+}
+
 void generate_readings(std::list<Sensor *> &sl, std::list<UAV *> &ul, int maxTime) {
 	std::uniform_real_distribution<double> uniform_distribution(0.0, 1.0);
 	std::uniform_int_distribution<int> uniform_distribution_uav(0.0, ul.size()-1);
@@ -1027,7 +1187,8 @@ int main(int argc, char **argv) {
 	const std::string &seedUser = input.getCmdOption("-seed");
 	const std::string &dotFileOutput = input.getCmdOption("-dot");
 	const std::string &inputTimeSim = input.getCmdOption("-time");
-	const std::string &algotype = input.getCmdOption("-algo");
+	const std::string &algotype_clustering = input.getCmdOption("-algoClust");
+	const std::string &algotype_tsp = input.getCmdOption("-algoTSP");
 
 	if (!seedUser.empty()) {
 		int seedR = atoi(seedUser.c_str());
@@ -1090,40 +1251,59 @@ int main(int argc, char **argv) {
 
 	printLogsSensors(sensorsList, time_N);
 
-	if (!algotype.empty()) {
-		if (algotype.compare("kmS") == 0) {
+	// CLUSTERING PHASE
+	if (!algotype_clustering.empty()) {
+		if (algotype_clustering.compare("kmS") == 0) {
 			kmeans_clustering(clustersVec, sensorsList); //simple k-means
 		}
-		else if (algotype.compare("kmR") == 0) {
+		else if (algotype_clustering.compare("kmR") == 0) {
 			kmeans_clustering_withReadings(clustersVec, sensorsList, time_N);	//k-means with loss in the distance calculus
 		}
-		else if (algotype.compare("eqLoss") == 0) {
+		else if (algotype_clustering.compare("eqLoss") == 0) {
 			equalizerLoss_clustering(clustersVec, sensorsList, time_N);	// just random for now
 		}
-		else if (algotype.compare("eqRandLoss") == 0) {
+		else if (algotype_clustering.compare("eqRandLoss") == 0) {
 			randomMinimumLoss_clustering(clustersVec, sensorsList, time_N);	// from each random sensor choose the closest cluster
 		}
-		else if (algotype.compare("rrMinLoss") == 0) {
+		else if (algotype_clustering.compare("rrMinLoss") == 0) {
 			roundRobinMinimumLoss_clustering(clustersVec, sensorsList, time_N);	// round robin cluster, choose mis loss sensor
 		}
-		else if (algotype.compare("rrMinLossLocal") == 0) {
+		else if (algotype_clustering.compare("rrMinLossLocal") == 0) {
 			roundRobinMinimumLossLocal_clustering(clustersVec, sensorsList, time_N);	// round robin cluster, choose mis loss sensor
 		}
 		else {
-			cerr << "Unknown algotype: \"" << algotype << "\". Using default simple k-means" << endl;
+			cerr << "Unknown algotype for clustering: \"" << algotype_clustering << "\". Using default simple k-means" << endl;
 			kmeans_clustering(clustersVec, sensorsList);
 		}
-
 		printLossStats(clustersVec, sensorsList, time_N);
-
 	}
 	else {
 		//default simple k-means
+		cerr << "Undefined algotype for clustering. Using default simple k-means" << endl;
 		kmeans_clustering(clustersVec, sensorsList);
 	}
 
-	//kmeans_clustering(clustersVec, sensorsList);
-	//kmeans_clustering_withReadings(clustersVec, sensorsList, time_N);
+	// TSP PHASE
+	if (!algotype_tsp.empty()) {
+		if (algotype_tsp.compare("frTSP") == 0) {
+			fullRandom_tsp(clustersVec); //full random TSP
+		}
+		else if (algotype_tsp.compare("nfrTSP") == 0) {
+			noFullRandom_tsp(clustersVec); //no full random TSP
+		}
+		else if (algotype_tsp.compare("tspChrist") == 0) {
+			christofides_tsp(clustersVec); //original Christofides algorithm
+		}
+		else {
+			cerr << "Unknown algotype for tsp: \"" << algotype_tsp << "\". Using default full random TSP" << endl;
+			fullRandom_tsp(clustersVec);
+		}
+	}
+	else {
+		//default simple k-means
+		cerr << "Undefined algotype for tsp. Using default full random TSP" << endl;
+		fullRandom_tsp(clustersVec);
+	}
 
 	if (!dotFileOutput.empty()) {
 		generateDOTfile(dotFileOutput, clustersVec, sensorsList, scenarioSize, ((double) scenarioSize)/50.0, time_N);
