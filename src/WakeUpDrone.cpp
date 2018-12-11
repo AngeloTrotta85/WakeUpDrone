@@ -13,6 +13,7 @@
 #include <algorithm>    // std::find
 #include <vector>       // std::vector
 #include <list>       // std::list
+#include <stack>
 #include <map>       // std::list
 #include <cstdlib>
 #include <ctime>
@@ -23,6 +24,8 @@
 #include <boost/math/special_functions/factorials.hpp>
 #include "MyCoord.h"
 #include "tsp.h"
+
+#define TSP_UAV_CODE 100000
 
 #define K_D 0.08
 #define K_T 0.02
@@ -189,7 +192,8 @@ public:
 	MyTSP(std::list<Sensor *> sl) {
 		//int count = sl.size();
 		for (auto& s : sl) {
-			cities.push_back(s);
+			//cities.push_back(s);
+			cities[s->id] = s;
 
 			distance_graph[s->id] = map<int, double>();
 			for (auto& s1 : sl) {
@@ -199,6 +203,21 @@ public:
 			path_vals[s->id] = std::make_pair(0, 0);
 			adj_list[s->id] = list<Sensor *>();
 		}
+
+		pathLength = 0;
+	}
+
+	MyTSP(std::list<Sensor *> sl, UAV *u) : MyTSP(sl) {
+		cities[TSP_UAV_CODE] = new Sensor(u->recharge_coord, 1, TSP_UAV_CODE);
+
+		distance_graph[TSP_UAV_CODE] = map<int, double>();
+		for (auto& s : sl) {
+			distance_graph[TSP_UAV_CODE][s->id] = 0;
+			distance_graph[s->id][TSP_UAV_CODE] = 0;
+		}
+
+		path_vals[TSP_UAV_CODE] = std::make_pair(0, 0);
+		adj_list[TSP_UAV_CODE] = list<Sensor *>();
 	}
 
 	int get_size() {return cities.size();};
@@ -206,20 +225,251 @@ public:
 	void fillMatrix() {
 		for (auto& s1 : cities) {
 			for (auto& s2 : cities) {
-				distance_graph[s1->id][s2->id] = s1->coord.distance(s2->coord);
+				distance_graph[s1.second->id][s2.second->id] = s1.second->coord.distance(s2.second->coord);
 			}
 		}
 	}
 
-	void findMST() {
+	/******************************************************************************
+	  find the index of the closest unexamined node
+	 ******************************************************************************/
+	int getMinIndex(map<int, double> &key, map<int, bool> &mst) {
+		// initialize min and min_index
+		double min = std::numeric_limits<double>::max();
+		int min_index = 0;
+		// iterate through each vertex
+		for (auto& s : cities) {
+			// if vertex hasn't been visited and has a smaller key than min
+			if ((mst[s.second->id] == false) && (key[s.second->id] < min)) {
+				// reassign min and min_index to the values from this node
+				min = key[s.second->id];
+				min_index = s.second->id;
+			}
+		}
+		return min_index;
+	}
 
+	void findMST() {
+		map<int, double> key_map;
+		map<int, bool> included_map;
+		map<int, int> parent_map;
+
+		//cout << "findMST 0" << endl << flush;
+		for (auto& s : cities) {
+		    // set each key to infinity
+			key_map[s.second->id] = std::numeric_limits<double>::max();
+		    // node node yet included in MST
+			included_map[s.second->id] = false;
+			// no parent
+			parent_map[s.second->id] = -1;
+		}
+		//cout << "findMST 1" << endl << flush;
+
+		// root of MST has distance of 0 and no parent
+		auto it_c = cities.begin();
+		key_map[it_c->second->id] = 0;
+		while (it_c != cities.end()) {
+		    // find closes vertex not already in tree
+		    int k = getMinIndex(key_map, included_map);
+
+		    // set included to true for this vertex
+		    included_map[k] = true;
+
+		    // examine each unexamined vertex adjacent to most recently added
+		    for (auto& c : cities) {
+		        // node exists, is unexamined, and graph[k][j] less than previous
+		        // key for u
+		        if (	distance_graph[k][c.second->id] &&
+		        		(included_map[c.second->id] == false) &&
+						(distance_graph[k][c.second->id] < key_map[c.second->id])) {
+		            // update parent
+		        	parent_map[c.second->id] = k;
+
+		            // update key
+		        	key_map[c.second->id] = distance_graph[k][c.second->id];
+		        }
+
+		    }
+		    it_c++;
+		}
+
+
+		//cout << "findMST 2" << endl << flush;
+
+		// construct a tree by forming adjacency matrices
+		for (auto& c : cities) {
+			int i = c.second->id;
+			int j = parent_map[i];
+
+			//cout << "findMST 2_1 - i=" << i << "; j=" << j << endl << flush;
+			//cout << "findMST 2_2 - i=" << cities.count(i) << "; j=" << cities.count(j) << endl << flush;
+
+			if (j != -1) {
+				Sensor *ci = cities[i];
+				Sensor *cj = cities[j];
+				adj_list[i].push_back(cj);
+				adj_list[j].push_back(ci);
+			}
+			//cout << "findMST 2_3 - i=" << cities.count(i) << "; j=" << cities.count(j) << endl << flush;
+		}
+
+		//cout << "findMST 3" << endl << flush;
+	}
+
+	/******************************************************************************
+	  find all vertices of odd degree in the MST. Store them in an subgraph O
+	******************************************************************************/
+	void findOdds() {
+		for (auto& s : cities) {
+		    // if degree of vertex i is odd
+		    if ((adj_list[s.second->id].size() % 2) != 0) {
+		      // push vertex to odds, which is a representation of subgraph O
+		      odds.push_back(s.second->id);
+		    }
+		}
+	}
+
+	/************************************************************************************
+	   find a perfect matching M in the subgraph O using greedy algorithm but not minimum
+	  *************************************************************************************/
+	void perfectMatching(){
+		int closest, length; //int d;
+		std::vector<int>::iterator tmp, first;
+
+		// Find nodes with odd degrees in T to get subgraph O
+		findOdds();
+
+		// for each odd node
+		while (!odds.empty()) {
+			first = odds.begin();
+			vector<int>::iterator it = odds.begin() + 1;
+			vector<int>::iterator end = odds.end();
+			length = std::numeric_limits<int>::max();
+			for (; it != end; ++it) {
+				// if this node is closer than the current closest, update closest and length
+				if (distance_graph[*first][*it] < length) {
+					length = distance_graph[*first][*it];
+					closest = *it;
+					tmp = it;
+				}
+			} // two nodes are matched, end of list reached
+			Sensor *c_closest = cities[closest];
+			Sensor *c_first = cities[*first];
+			adj_list[*first].push_back(c_closest);
+			adj_list[closest].push_back(c_first);
+			odds.erase(tmp);
+			odds.erase(first);
+		}
+	}
+
+	//find an euler circuit
+	void euler_tour(int start, vector<int> &path){
+		//Create copy of adj. list
+		map< int, list<Sensor *> > tempList;
+		for (auto& s : cities) {
+			tempList[s.second->id] = list<Sensor *>();
+			for (auto& ac : adj_list[s.second->id]) {
+				tempList[s.second->id].push_back(ac);
+			}
+		}
+
+		stack<int> stack;
+		int pos = start;
+		path.push_back(start);
+		while(!stack.empty() || tempList[pos].size() > 0){
+			//Current node has no neighbors
+			if(tempList[pos].empty()){
+				//add to circuit
+				path.push_back(pos);
+				//remove last vertex from stack and set it to current
+				pos = stack.top();
+				stack.pop();
+			}
+			//If current node has neighbors
+			else{
+				//Add vertex to stack
+				stack.push(pos);
+
+				//Take a neighbor
+				int neighbor = tempList[pos].back()->id;
+
+				//Remove edge between neighbor and current vertex
+				tempList[pos].pop_back();
+
+				auto it_t = tempList[neighbor].begin();
+				while(it_t != tempList[neighbor].end()){
+					if((*it_t)->id == pos){
+						it_t = tempList[neighbor].erase(it_t);
+					}
+					else {
+						it_t++;
+					}
+				}
+				//Set neighbor as current vertex
+				pos = neighbor;
+			}
+		}
+		path.push_back(pos);
+	}
+
+
+	//Make euler tour Hamiltonian
+	void make_hamiltonian(vector<int> &path, double &pathCost){
+		//remove visited nodes from Euler tour
+		map< int, bool> visited;
+		for (auto& c : cities) {
+			visited[c.second->id] = 0;
+		}
+
+		pathCost = 0;
+
+		int root = path.front();
+		vector<int>::iterator cur = path.begin();
+		vector<int>::iterator iter = path.begin()+1;
+		visited[root] = 1;
+
+		//iterate through circuit
+		while(iter != path.end()){
+			if(!visited[*iter]){
+				pathCost += distance_graph[*cur][*iter];
+				cur = iter;
+				visited[*cur] = 1;
+				iter = cur + 1;
+			}
+			else{
+				iter = path.erase(iter);
+			}
+		}
+
+		//Add distance to root
+		pathCost += distance_graph[*cur][*iter];
+	}
+
+	double findBestPath(int start){
+		vector<int> path;
+		euler_tour(start, path);
+
+		double length;
+		make_hamiltonian(path, length);
+
+		return length;
 	}
 
 public:
-	vector<Sensor *> cities;
+	//vector<Sensor *> cities;
+	map< int, Sensor *> cities;
 	map< int, map<int, double> > distance_graph;
-	map< int, std::pair<double, double> > path_vals;
+	map< int, std::pair<int, double> > path_vals;
 	map< int, list<Sensor *> > adj_list;
+
+	// List of odd nodes
+	vector<int> odds;
+
+	//euler circuit
+	vector<int> circuit;
+
+	//Shortest path length
+	double pathLength;
 };
 
 double algebraic_sum(double a, double b) {
@@ -1041,73 +1291,75 @@ void noFullRandom_tsp(std::vector<CoordCluster *> &cv) {
 
 void christofides_tsp(std::vector<CoordCluster *> &cv) {
 	for (auto& c : cv) {
-		MyTSP mytsp(c->pointsList);
+		//MyTSP mytsp(c->pointsList);
+		MyTSP mytsp(c->pointsList, c->clusterUAV);
 
 		cout << "tsp created" << endl;
-		int mytsp_size = mytsp.get_size();
 
 		// Fill N x N matrix with distances between nodes
 		cout << "Fillmatrix started" << endl;
 		mytsp.fillMatrix();
-		cout << "Filled Matrix" << endl;
+		cout << "Filled Matrix" << endl << flush;
 
 		// Find a MST T in graph G
 		mytsp.findMST();
-		cout << "MST created" << endl;
-
-
-		TSP tsp(c->pointsList);
-
-		//cout << "tsp created" << endl;
-		int tsp_size = tsp.get_size();
-
-		// Fill N x N matrix with distances between nodes
-		//cout << "Fillmatrix started" << endl;
-		//tsp.fillMatrix();
-		//cout << "Filled Matrix" << endl;
-
-		// Find a MST T in graph G
-		tsp.findMST();
-		cout << "MST created" << endl;
+		cout << "MST created" << endl << flush;
 
 		// Find a minimum weighted matching M for odd vertices in T
-		tsp.perfectMatching();
-		cout << "Matching completed" << endl;
+		mytsp.perfectMatching();
+		cout << "Matching completed" << endl << flush;
 
 		// Loop through each index and find shortest path
-		int best = INT_MAX;
-		int bestIndex;
-		for (long t = 0; t < tsp_size; t++) {
-			int result = tsp.findBestPath(t);
+		double best = std::numeric_limits<double>::max();
+		int bestIndex = 0;
+		for (auto& s : mytsp.cities) {
+			double result = mytsp.findBestPath(s.second->id);
 
-			tsp.path_vals[t][0] = t; // set start
-			tsp.path_vals[t][1] = result; // set end
+			mytsp.path_vals[s.second->id] = make_pair(s.second->id, result); //set <start, length>
 
-			if (tsp.path_vals[t][1] < best) {
-				bestIndex = tsp.path_vals[t][0];
-				best = tsp.path_vals[t][1];
+			if (mytsp.path_vals[s.second->id].second < best) {
+				bestIndex = mytsp.path_vals[s.second->id].first;
+				best = mytsp.path_vals[s.second->id].second;
 			}
 		}
+		cout << "Best Found" << endl;
 
 		//Create path for best tour
-		tsp.euler_tour(bestIndex,tsp.circuit);
-		tsp.make_hamiltonian(tsp.circuit,tsp.pathLength);
+		mytsp.euler_tour(bestIndex, mytsp.circuit);
+		mytsp.make_hamiltonian(mytsp.circuit, mytsp.pathLength);
 
-		/*
-			tsp.euler_tour(0, tsp.circuit);
-			cout << "euler completed" << endl;
-			tsp.make_hamiltonian(tsp.circuit, tsp.pathLength);
-			cout << "ham completed" << endl;
-		 */
+		// save in the data-structure
+		c->pointsTSP_listFinal.clear();
 
-		// Store best path
-		//tsp.create_tour(bestIndex);
+		cout << "lloking for the ite_UAV" << endl << flush;
 
-		cout << "Final length: " << tsp.pathLength << endl;
+		auto ite_UAV = mytsp.circuit.begin();
+		while(ite_UAV != mytsp.circuit.end()) {
+			if (*ite_UAV == TSP_UAV_CODE) {
+				break;
+			}
+			ite_UAV++;
+		}
 
-		// Print to file
-		tsp.printPath();
-		tsp.printResult();
+		cout << "ite_UAV found: " << *ite_UAV << endl << flush;
+
+		if (ite_UAV != mytsp.circuit.end()) {
+			auto ite_TSP = ite_UAV;
+			ite_TSP++;
+			while(*ite_UAV != *ite_TSP) {
+				if (ite_TSP == mytsp.circuit.end()) {
+					ite_TSP = mytsp.circuit.begin();
+				}
+				c->pointsTSP_listFinal.push_back((Sensor *)mytsp.cities[*ite_TSP]);
+				ite_TSP++;
+			}
+		}
+		else {
+			cerr << "Warning, no UAV found" << endl;
+		}
+		//for (auto& f : mytsp.circuit) {
+		//	c->pointsTSP_listFinal.push_back((Sensor *)mytsp.cities[f]);
+		//}
 	}
 }
 
