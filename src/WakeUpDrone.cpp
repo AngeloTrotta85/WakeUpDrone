@@ -120,17 +120,20 @@ int Sensor::idSensGen = 0;
 
 class UAV {
 public:
-	UAV(MyCoord recCoord) {
+	UAV(MyCoord recCoord, double re) {
 		recharge_coord = recCoord;
+		residual_energy = re;
 		id = idUAVGen++;
 	}
-	UAV(MyCoord recCoord, int id_new) {
+	UAV(MyCoord recCoord, double re, int id_new) {
 		recharge_coord = recCoord;
+		residual_energy = re;
 		id = id_new;
 	}
 
 public:
 	MyCoord recharge_coord;
+	double residual_energy;
 	std::list<Readings *> mySensorReadings;
 	int id;
 	static int idUAVGen;
@@ -218,6 +221,38 @@ public:
 
 		path_vals[TSP_UAV_CODE] = std::make_pair(0, 0);
 		adj_list[TSP_UAV_CODE] = list<Sensor *>();
+
+		// Fill N x N matrix with distances between nodes
+		//cout << "Fillmatrix started" << endl;
+		fillMatrix();
+		//cout << "Filled Matrix" << endl << flush;
+
+		// Find a MST T in graph G
+		findMST();
+		//cout << "MST created" << endl << flush;
+
+		// Find a minimum weighted matching M for odd vertices in T
+		perfectMatching();
+		//cout << "Matching completed" << endl << flush;
+
+		// Loop through each index and find shortest path
+		double best = std::numeric_limits<double>::max();
+		int bestIndex = 0;
+		for (auto& s : cities) {
+			double result = findBestPath(s.second->id);
+
+			path_vals[s.second->id] = make_pair(s.second->id, result); //set <start, length>
+
+			if (path_vals[s.second->id].second < best) {
+				bestIndex = path_vals[s.second->id].first;
+				best = path_vals[s.second->id].second;
+			}
+		}
+		//cout << "Best Found" << endl;
+
+		//Create path for best tour
+		euler_tour(bestIndex, circuit);
+		make_hamiltonian(circuit, pathLength);
 	}
 
 	int get_size() {return cities.size();};
@@ -491,7 +526,9 @@ void generateRandomSensors(std::list<Sensor *> &pl, int ss, int ns) {
 void generateRandomUAVs(std::list<UAV *> &pl, int ss, int nu) {
 	for (int i : boost::irange(0, nu)) { // i goes from 0 to nu-1
 		std::uniform_real_distribution<double> uniform_distribution(0.0, ss);
-		UAV *newU = new UAV(MyCoord(uniform_distribution(*generator_rand), uniform_distribution(*generator_rand)));
+		std::normal_distribution<double> n_distribution(100000.0,5000.0);
+
+		UAV *newU = new UAV(MyCoord(uniform_distribution(*generator_rand), uniform_distribution(*generator_rand)), n_distribution(*generator_rand));
 		pl.push_back(newU);
 		cout << "UAV: " << i << " --> " << newU->recharge_coord << endl;
 	}
@@ -500,11 +537,12 @@ void generateRandomUAVs(std::list<UAV *> &pl, int ss, int nu) {
 void importSensorsFromFile(std::string inputFileName, std::list<Sensor *> &pl) {
 	std::ifstream fileInput(inputFileName, std::ifstream::in);
 	std::string str;
+	int ids;
 	double x, y, e;
 	if(fileInput.is_open()) {
 		while (std::getline(fileInput, str)) {
-			sscanf(str.c_str(), "%lf;%lf;%lf", &x, &y, &e);
-			Sensor *np = new Sensor(MyCoord(x, y), e);
+			sscanf(str.c_str(), "%d;%lf;%lf;%lf", &ids, &x, &y, &e);
+			Sensor *np = new Sensor(MyCoord(x, y), e, ids);
 			pl.push_back(np);
 			//cout << "From file: " << str << ". Parsed sensor: " << x << ";" << y << endl;
 		}
@@ -515,11 +553,12 @@ void importSensorsFromFile(std::string inputFileName, std::list<Sensor *> &pl) {
 void importUAVsFromFile(std::string inputFileName, std::list<UAV *> &pl) {
 	std::ifstream fileInput(inputFileName, std::ifstream::in);
 	std::string str;
-	double x, y;
+	int idu;
+	double x, y, e;
 	if(fileInput.is_open()) {
 		while (std::getline(fileInput, str)) {
-			sscanf(str.c_str(), "%lf;%lf", &x, &y);
-			UAV *np = new UAV(MyCoord(x, y));
+			sscanf(str.c_str(), "%d;%lf;%lf;%lf", &idu, &x, &y, &e);
+			UAV *np = new UAV(MyCoord(x, y), e, idu);
 			pl.push_back(np);
 			//cout << "From file: " << str << ". Parsed sensor: " << x << ";" << y << endl;
 		}
@@ -586,7 +625,7 @@ void writeOnFileSensors(std::string fn, std::list<Sensor *> pointList) {
 	std::ofstream fout(fn, std::ofstream::out);
 	if (fout.is_open()) {
 		for (auto& p : pointList) { // i goes from 0 to (ni-1) inclusive
-			fout << p->coord.x << ";" << p->coord.y << ";" << p->residual_energy << endl;
+			fout << p->id << ";" << p->coord.x << ";" << p->coord.y << ";" << p->residual_energy << endl;
 		}
 		fout.close();
 	}
@@ -595,7 +634,7 @@ void writeOnFileUAVs(std::string fn, std::list<UAV *> pointList) {
 	std::ofstream fout(fn, std::ofstream::out);
 	if (fout.is_open()) {
 		for (auto& p : pointList) { // i goes from 0 to (ni-1) inclusive
-			fout << p->recharge_coord.x << ";" << p->recharge_coord.y << endl;
+			fout << p->id << ";" << p->recharge_coord.x << ";" << p->recharge_coord.y << ";" << p->residual_energy << endl;
 		}
 		fout.close();
 	}
@@ -1294,20 +1333,21 @@ void christofides_tsp(std::vector<CoordCluster *> &cv) {
 		//MyTSP mytsp(c->pointsList);
 		MyTSP mytsp(c->pointsList, c->clusterUAV);
 
-		cout << "tsp created" << endl;
+		/*
+		//cout << "tsp created" << endl;
 
 		// Fill N x N matrix with distances between nodes
-		cout << "Fillmatrix started" << endl;
+		//cout << "Fillmatrix started" << endl;
 		mytsp.fillMatrix();
-		cout << "Filled Matrix" << endl << flush;
+		//cout << "Filled Matrix" << endl << flush;
 
 		// Find a MST T in graph G
 		mytsp.findMST();
-		cout << "MST created" << endl << flush;
+		//cout << "MST created" << endl << flush;
 
 		// Find a minimum weighted matching M for odd vertices in T
 		mytsp.perfectMatching();
-		cout << "Matching completed" << endl << flush;
+		//cout << "Matching completed" << endl << flush;
 
 		// Loop through each index and find shortest path
 		double best = std::numeric_limits<double>::max();
@@ -1322,16 +1362,18 @@ void christofides_tsp(std::vector<CoordCluster *> &cv) {
 				best = mytsp.path_vals[s.second->id].second;
 			}
 		}
-		cout << "Best Found" << endl;
+		//cout << "Best Found" << endl;
 
 		//Create path for best tour
 		mytsp.euler_tour(bestIndex, mytsp.circuit);
 		mytsp.make_hamiltonian(mytsp.circuit, mytsp.pathLength);
 
+		*/
+
 		// save in the data-structure
 		c->pointsTSP_listFinal.clear();
 
-		cout << "lloking for the ite_UAV" << endl << flush;
+		//cout << "lloking for the ite_UAV" << endl << flush;
 
 		auto ite_UAV = mytsp.circuit.begin();
 		while(ite_UAV != mytsp.circuit.end()) {
@@ -1341,7 +1383,70 @@ void christofides_tsp(std::vector<CoordCluster *> &cv) {
 			ite_UAV++;
 		}
 
-		cout << "ite_UAV found: " << *ite_UAV << endl << flush;
+		//cout << "ite_UAV found: " << *ite_UAV << endl << flush;
+
+		if (ite_UAV != mytsp.circuit.end()) {
+			auto ite_TSP = ite_UAV;
+			ite_TSP++;
+			while(*ite_UAV != *ite_TSP) {
+				if (ite_TSP == mytsp.circuit.end()) {
+					ite_TSP = mytsp.circuit.begin();
+				}
+				c->pointsTSP_listFinal.push_back((Sensor *)mytsp.cities[*ite_TSP]);
+				ite_TSP++;
+			}
+		}
+		else {
+			cerr << "Warning, no UAV found" << endl;
+		}
+		//for (auto& f : mytsp.circuit) {
+		//	c->pointsTSP_listFinal.push_back((Sensor *)mytsp.cities[f]);
+		//}
+	}
+}
+
+void christofides_dist_tsp(std::vector<CoordCluster *> &cv, std::list<Sensor *> &sl, int time_now) {
+	map<int, list<Sensor *> > wakeup_sensors;
+
+	// init the wakeup_sensors with a single sensor
+	for (auto& c : cv) {
+		Sensor *bestS = nullptr;
+		double minLoss = numeric_limits<double>::max();
+
+		for (auto& s : c->pointsList) {
+			double sLossFull = calculate_loss_full(s, time_now, sl, ALPHA, BETA, GAMMA);
+			if (sLossFull < minLoss) {
+				minLoss = sLossFull;
+				bestS = s;
+			}
+		}
+		if (bestS != nullptr) {
+			wakeup_sensors[c->clusterID] = list<Sensor *>();
+
+		}
+		else {
+			cerr << "Error in christofides_dist_tsp. Cluster with no sensors" << endl;
+			exit(EXIT_FAILURE);
+		}
+	}
+
+	for (auto& c : cv) {
+		MyTSP mytsp(wakeup_sensors[c->clusterID], c->clusterUAV);
+
+		// save in the data-structure
+		c->pointsTSP_listFinal.clear();
+
+		//cout << "lloking for the ite_UAV" << endl << flush;
+
+		auto ite_UAV = mytsp.circuit.begin();
+		while(ite_UAV != mytsp.circuit.end()) {
+			if (*ite_UAV == TSP_UAV_CODE) {
+				break;
+			}
+			ite_UAV++;
+		}
+
+		//cout << "ite_UAV found: " << *ite_UAV << endl << flush;
 
 		if (ite_UAV != mytsp.circuit.end()) {
 			auto ite_TSP = ite_UAV;
@@ -1545,6 +1650,9 @@ int main(int argc, char **argv) {
 		}
 		else if (algotype_tsp.compare("tspChrist") == 0) {
 			christofides_tsp(clustersVec); //original Christofides algorithm
+		}
+		else if (algotype_tsp.compare("tspChristDist") == 0) {
+			christofides_dist_tsp(clustersVec, sensorsList, time_N); //original Christofides algorithm
 		}
 		else {
 			cerr << "Unknown algotype for tsp: \"" << algotype_tsp << "\". Using default full random TSP" << endl;
